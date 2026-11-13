@@ -92,9 +92,30 @@ int main(int argc, char* argv[]) {
         size_t skipped = 0;
         for (auto& item : batch.items) {
             uint64_t h = vr::HashFileContents(item.path);
-            if (h != 0 && processedSet.Contains(h)) {
-                skipped++;
-                continue;
+            vr::DemoOutcome outcome = vr::DemoOutcome::HadVoice;
+            if (h != 0 && processedSet.Contains(h, &outcome)) {
+                // Empty demos never leave anything on disk (no output
+                // folder is created for them by design), so the hash
+                // alone is their only marker -- keep skipping those.
+                // But a demo that HAD voice is only really "done" while
+                // its "<demoname>_voice" folder still exists. If the
+                // user deleted the results (e.g. to redo them with a
+                // newer VoiceRipper build) and re-drops the same demo,
+                // it must process again -- previously the bare hash
+                // match skipped it forever, which looked like the tool
+                // flat-out ignoring the input.
+                if (outcome == vr::DemoOutcome::Empty) {
+                    skipped++;
+                    continue;
+                }
+                std::string demoOutDir = (outRootUtf8.empty() ? "" : (outRootUtf8 + "/"))
+                                        + vr::Utf8Stem(item.displayName) + "_voice";
+                if (std::filesystem::exists(vr::PathFromUtf8(demoOutDir))) {
+                    skipped++;
+                    continue;
+                }
+                // Output folder is gone: fall through and re-process,
+                // the manifest entry gets refreshed below.
             }
             keep.push_back(item);
         }
@@ -152,7 +173,10 @@ int main(int argc, char* argv[]) {
             vr::PrintDemoSummary(s, demoOutDir, o.quiet);
             if (s.ok) {
                 uint64_t h = vr::HashFileContents(item.path);
-                if (h != 0) processedSet.Add(h);
+                if (h != 0) {
+                    processedSet.Add(h, s.written.empty() ? vr::DemoOutcome::Empty
+                                                          : vr::DemoOutcome::HadVoice);
+                }
             }
             summaries[i] = std::move(s);
         }

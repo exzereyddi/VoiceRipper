@@ -23,7 +23,16 @@ bool VoiceEncoder_Speex::Init(int quality, int &rawFrameSize, int &encodedFrameS
 	if (!InitStates())
 		return false;
 
-	rawFrameSize = 320;
+	// Speex narrowband decodes 20 ms frames of 160 samples at 8 kHz. The
+	// surrounding pipeline (VoiceRipper / ReVoiceDecoder alike) treats
+	// codec output as 48 kHz, so one decoded frame must become 960
+	// samples = 1920 bytes, playing back at exactly the 20 ms it lasted
+	// in game. Without this x6 upsample the legacy-speex path produces
+	// "chipmunk" audio running 6x too fast (160 samples @ 48 kHz is only
+	// 3.3 ms) -- the original vendored glue had both this bug AND an
+	// inverted DecodeFrame success contract, which together made the
+	// whole voice_speex family output nothing at all.
+	rawFrameSize = 960 * 2;
 
 	switch (quality) {
 		case 2:
@@ -80,16 +89,34 @@ void VoiceEncoder_Speex::EncodeFrame(const char *pUncompressedBytes, char *pComp
 int VoiceEncoder_Speex::DecodeFrame(const char *pCompressed, char *pDecompressedBytes)
 {
 	float output[160];
-	int16_t *out = (int16_t *)pDecompressedBytes;
 
 	speex_bits_read_from(&m_Bits, (char *)pCompressed, ENCODED_FRAME_SIZE[m_Quality]);
-	if (speex_decode(m_DecoderState, &m_Bits, output) != 0)
-		return 0;
 
-	for (int i = 0; i < ARRAYSIZE(output); i++, out++) {
-		*out = (int)output[i];
+	// VoiceCodec_Frame::Decompress expects the IFrameEncoder contract
+	// "return 0 on success" (its loop is `if (DecodeFrame(...) != 0)
+	// return 0;`); speex_decode returns 0 for success and negative for a
+	// corrupt stream -- exactly that contract. The original vendored glue
+	// negated it into 1-on-success, which made VoiceCodec_Frame treat
+	// every SUCCESSFUL speex frame as a failure: the whole legacy-speex
+	// path never produced a single sample, which is why all "should be
+	// plain voice_speex" demos fell through to other codecs and either
+	// failed or produced garbage.
+	if (speex_decode(m_DecoderState, &m_Bits, output) != 0)
+		return -1;
+
+	// Linear x6 upsample 8 kHz -> 48 kHz (speech content lives well below
+	// 4 kHz, so interpolation keeps it fully intelligible) so one 20 ms
+	// frame occupies 960 output samples = exactly 20 ms at the pipeline
+	// rate.
+	int16_t *out = (int16_t *)pDecompressedBytes;
+	for (int i = 0; i < 160; i++) {
+		int16_t s = (int16_t)output[i];
+		for (int sub = 0; sub < 6; sub++) {
+			int next = (i + 1 < 160) ? (int)output[i + 1] : (int)s;
+			out[i * 6 + sub] = (int16_t)(((int)s * (6 - sub) + next * sub) / 6);
+		}
 	}
-	return 1;
+	return 0;
 }
 
 bool VoiceEncoder_Speex::ResetState()

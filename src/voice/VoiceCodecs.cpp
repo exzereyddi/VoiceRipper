@@ -48,6 +48,18 @@ constexpr float kPauseBetweenUtterancesSec = 1.0f;
 constexpr size_t kMaxDecodeBuf = 0x100000;
 constexpr int kMinValidSamples = 4; // matches ReVoiceDecoder's VALID_SAMPLES_TEST
 
+// Which codec family a speaker's chunks turned out to be encoded with.
+// Auto-detected on the first chunk that decodes cleanly, then locked for
+// the whole track (per-speaker state: one demo can mix speakers whose
+// voice went through different server-side codec paths).
+enum class ActiveCodec {
+    None,     // not detected yet
+    Opus,     // Steam P2P wrapper + Opus
+    SilkP2p,  // Steam P2P wrapper + Silk
+    SilkRaw,  // raw SKP_Silk packets, no wrapper (old engine format)
+    Speex,    // raw 38-byte CBR narrowband frames
+};
+
 } // namespace
 
 std::vector<int16_t> DecodeSpeakerChunks(
@@ -64,12 +76,18 @@ std::vector<int16_t> DecodeSpeakerChunks(
     IVoiceCodec* speexCodec = opts.useSpeex ? new VoiceCodec_Frame(new VoiceEncoder_Speex()) : nullptr;
     IVoiceCodec* silkCodec  = opts.useSilk  ? new CSteamP2PCodec(new VoiceEncoder_Silk())    : nullptr;
     IVoiceCodec* opusCodec  = opts.useOpus  ? new CSteamP2PCodec(new VoiceEncoder_Opus())    : nullptr;
+    // Raw SKP_Silk frames without any wrapper (the old engine-era
+    // "voice_silk" wire format, still what no-steam server scenes record
+    // into their HLTV demos). Tried after the P2P-wrapped codecs, before
+    // speex.
+    IVoiceCodec* silkRawCodec = opts.useSilk ? new VoiceCodec_RawSilk() : nullptr;
 
     if (speexCodec) speexCodec->Init(kVoiceQuality);
     if (silkCodec)  silkCodec->Init(kVoiceQuality);
     if (opusCodec)  opusCodec->Init(kVoiceQuality);
+    if (silkRawCodec) silkRawCodec->Init(kVoiceQuality);
 
-    bool foundOpus = false, foundSilk = false, foundSpeex = false;
+    ActiveCodec active = ActiveCodec::None;
 
     std::vector<uint8_t> decodeBuf(kMaxDecodeBuf);
     float lastTime = chunks.front().first;
@@ -107,36 +125,91 @@ std::vector<int16_t> DecodeSpeakerChunks(
         lastTime = time;
 
         int samples = 0;
+        int opusSamples = -1, silkSamples = -1, silkRawSamples = -1, speexSamples = -1;
 
-        if (opusCodec && ((foundSilk && !foundSpeex) || !foundSilk) && !foundSpeex) {
+        auto tryDecode = [&](IVoiceCodec* codec, int* attempted) {
+            *attempted = codec->Decompress(reinterpret_cast<const char*>(data.data()),
+                                            static_cast<int>(data.size()),
+                                            reinterpret_cast<char*>(decodeBuf.data()),
+                                            static_cast<int>(decodeBuf.size()));
+            return *attempted > kMinValidSamples;
+        };
+
+        // Codec auto-detect ladder, same strategy ReVoiceDecoder uses, with
+        // one crucial upgrade over the original nested-if ladder: the
+        // first codec that produces valid audio STICKS, and every
+        // subsequent chunk decodes through that codec only. The old
+        // ladder re-ran the whole cascade in the wrong order once a
+        // non-standard codec (raw Silk) had been detected, silently
+        // falling back to speex for every chunk after the first and
+        // producing nothing.
+        if (active == ActiveCodec::Opus) {
             samples = opusCodec->Decompress(reinterpret_cast<const char*>(data.data()),
                                              static_cast<int>(data.size()),
                                              reinterpret_cast<char*>(decodeBuf.data()),
                                              static_cast<int>(decodeBuf.size()));
-        }
-
-        if ((samples > kMinValidSamples) || foundOpus) {
-            foundOpus = true;
-        } else if (silkCodec && !foundSpeex) {
+            opusSamples = samples;
+        } else if (active == ActiveCodec::SilkP2p) {
             samples = silkCodec->Decompress(reinterpret_cast<const char*>(data.data()),
+                                            static_cast<int>(data.size()),
+                                            reinterpret_cast<char*>(decodeBuf.data()),
+                                            static_cast<int>(decodeBuf.size()));
+            silkSamples = samples;
+        } else if (active == ActiveCodec::SilkRaw) {
+            samples = silkRawCodec->Decompress(reinterpret_cast<const char*>(data.data()),
+                                               static_cast<int>(data.size()),
+                                               reinterpret_cast<char*>(decodeBuf.data()),
+                                               static_cast<int>(decodeBuf.size()));
+            silkRawSamples = samples;
+        } else if (active == ActiveCodec::Speex) {
+            samples = speexCodec->Decompress(reinterpret_cast<const char*>(data.data()),
                                              static_cast<int>(data.size()),
                                              reinterpret_cast<char*>(decodeBuf.data()),
                                              static_cast<int>(decodeBuf.size()));
-            if ((samples > kMinValidSamples) || foundSilk) {
-                foundSilk = true;
-            } else if (speexCodec) {
-                samples = speexCodec->Decompress(reinterpret_cast<const char*>(data.data()),
-                                                  static_cast<int>(data.size()),
-                                                  reinterpret_cast<char*>(decodeBuf.data()),
-                                                  static_cast<int>(decodeBuf.size()));
-                if (samples > kMinValidSamples) foundSpeex = true;
+            speexSamples = samples;
+        } else {
+            // Not locked yet. Ladder mirrors what real servers actually
+            // send, in order of real-world likelihood: Steam-P2P Opus,
+            // Steam-P2P Silk, legacy plain speex (the format
+            // svc_voiceinit "voice_speex" advertises -- HLTV demos of
+            // no-steam servers carry exactly this), and only then raw
+            // SKP_Silk as the most exotic last resort. NOTE: the speex
+            // rung used to sit AFTER the raw-silk one and the vendored
+            // speex glue had an inverted success contract (see
+            // VoiceEncoder_Speex::DecodeFrame), so plain-speex demos
+            // used to fall into raw silk, which "decodes" foreign bytes
+            // into garbage noise without ever failing -- that produced
+            // the notorious robot-noise output on HLTV demos.
+            if (opusCodec && tryDecode(opusCodec, &opusSamples)) {
+                active = ActiveCodec::Opus;
+            } else if (silkCodec && tryDecode(silkCodec, &silkSamples)) {
+                active = ActiveCodec::SilkP2p;
+            } else if (speexCodec && tryDecode(speexCodec, &speexSamples)) {
+                active = ActiveCodec::Speex;
+            } else if (silkRawCodec && tryDecode(silkRawCodec, &silkRawSamples)) {
+                active = ActiveCodec::SilkRaw;
             }
-        } else if (speexCodec) {
-            samples = speexCodec->Decompress(reinterpret_cast<const char*>(data.data()),
-                                              static_cast<int>(data.size()),
-                                              reinterpret_cast<char*>(decodeBuf.data()),
-                                              static_cast<int>(decodeBuf.size()));
-            if (samples > kMinValidSamples) foundSpeex = true;
+            // samples from the winning attempt (0 if none won)
+            samples = opusSamples > kMinValidSamples ? opusSamples
+                   : silkSamples > kMinValidSamples ? silkSamples
+                   : speexSamples > kMinValidSamples ? speexSamples
+                   : silkRawSamples > kMinValidSamples ? silkRawSamples : 0;
+        }
+
+        if (ChunkProgLog().is_open()) {
+            char hex[1024 * 3 + 1];
+            size_t hx = 0;
+            size_t nHex = data.size() < 1024 ? data.size() : 1024;
+            for (size_t hb = 0; hb < nHex; hb++) {
+                hx += std::snprintf(hex + hx, sizeof(hex) - hx, "%02X ", data[hb]);
+            }
+            ChunkProgLog() << "[codec] t=" << time << " size=" << data.size()
+                           << " opus=" << opusSamples << " silk=" << silkSamples
+                           << " silkraw=" << silkRawSamples
+                           << " speex=" << speexSamples
+                           << " active=" << static_cast<int>(active)
+                           << " head=" << hex
+                           << std::endl;
         }
 
         if (samples > 0) {
@@ -151,6 +224,7 @@ std::vector<int16_t> DecodeSpeakerChunks(
     if (speexCodec) speexCodec->Release();
     if (silkCodec) silkCodec->Release();
     if (opusCodec) opusCodec->Release();
+    if (silkRawCodec) silkRawCodec->Release();
 
     if (opts.removeSilenceGaps) {
         std::vector<int16_t> trimmed;
@@ -183,12 +257,14 @@ void MixSpeakerChunksAt(
     IVoiceCodec* speexCodec = opts.useSpeex ? new VoiceCodec_Frame(new VoiceEncoder_Speex()) : nullptr;
     IVoiceCodec* silkCodec  = opts.useSilk  ? new CSteamP2PCodec(new VoiceEncoder_Silk())    : nullptr;
     IVoiceCodec* opusCodec  = opts.useOpus  ? new CSteamP2PCodec(new VoiceEncoder_Opus())    : nullptr;
+    IVoiceCodec* silkRawCodec = opts.useSilk ? new VoiceCodec_RawSilk() : nullptr;
 
     if (speexCodec) speexCodec->Init(kVoiceQuality);
     if (silkCodec)  silkCodec->Init(kVoiceQuality);
     if (opusCodec)  opusCodec->Init(kVoiceQuality);
+    if (silkRawCodec) silkRawCodec->Init(kVoiceQuality);
 
-    bool foundOpus = false, foundSilk = false, foundSpeex = false;
+    ActiveCodec active = ActiveCodec::None;
     std::vector<uint8_t> decodeBuf(kMaxDecodeBuf);
 
     // Voice codecs (Opus/Silk especially) decode each compressed chunk
@@ -221,35 +297,47 @@ void MixSpeakerChunksAt(
 
         int samples = 0;
 
-        if (opusCodec && ((foundSilk && !foundSpeex) || !foundSilk) && !foundSpeex) {
-            samples = opusCodec->Decompress(reinterpret_cast<const char*>(data.data()),
-                                             static_cast<int>(data.size()),
-                                             reinterpret_cast<char*>(decodeBuf.data()),
-                                             static_cast<int>(decodeBuf.size()));
-        }
+        auto tryDecodeMix = [&](IVoiceCodec* codec) {
+            return codec->Decompress(reinterpret_cast<const char*>(data.data()),
+                                     static_cast<int>(data.size()),
+                                     reinterpret_cast<char*>(decodeBuf.data()),
+                                     static_cast<int>(decodeBuf.size()));
+        };
 
-        if ((samples > kMinValidSamples) || foundOpus) {
-            foundOpus = true;
-        } else if (silkCodec && !foundSpeex) {
-            samples = silkCodec->Decompress(reinterpret_cast<const char*>(data.data()),
-                                             static_cast<int>(data.size()),
-                                             reinterpret_cast<char*>(decodeBuf.data()),
-                                             static_cast<int>(decodeBuf.size()));
-            if ((samples > kMinValidSamples) || foundSilk) {
-                foundSilk = true;
-            } else if (speexCodec) {
-                samples = speexCodec->Decompress(reinterpret_cast<const char*>(data.data()),
-                                                  static_cast<int>(data.size()),
-                                                  reinterpret_cast<char*>(decodeBuf.data()),
-                                                  static_cast<int>(decodeBuf.size()));
-                if (samples > kMinValidSamples) foundSpeex = true;
-            }
-        } else if (speexCodec) {
-            samples = speexCodec->Decompress(reinterpret_cast<const char*>(data.data()),
-                                              static_cast<int>(data.size()),
-                                              reinterpret_cast<char*>(decodeBuf.data()),
-                                              static_cast<int>(decodeBuf.size()));
-            if (samples > kMinValidSamples) foundSpeex = true;
+        // Same detect-then-lock ladder as DecodeSpeakerChunks.
+        switch (active) {
+            case ActiveCodec::Opus:
+                samples = tryDecodeMix(opusCodec);
+                break;
+            case ActiveCodec::SilkP2p:
+                samples = tryDecodeMix(silkCodec);
+                break;
+            case ActiveCodec::SilkRaw:
+                samples = tryDecodeMix(silkRawCodec);
+                break;
+            case ActiveCodec::Speex:
+                samples = tryDecodeMix(speexCodec);
+                break;
+            case ActiveCodec::None:
+            default:
+                samples = 0;
+                if (opusCodec) {
+                    samples = tryDecodeMix(opusCodec);
+                    if (samples > kMinValidSamples) active = ActiveCodec::Opus;
+                }
+                if (active == ActiveCodec::None && silkCodec) {
+                    samples = tryDecodeMix(silkCodec);
+                    if (samples > kMinValidSamples) active = ActiveCodec::SilkP2p;
+                }
+                if (active == ActiveCodec::None && speexCodec) {
+                    samples = tryDecodeMix(speexCodec);
+                    if (samples > kMinValidSamples) active = ActiveCodec::Speex;
+                }
+                if (active == ActiveCodec::None && silkRawCodec) {
+                    samples = tryDecodeMix(silkRawCodec);
+                    if (samples > kMinValidSamples) active = ActiveCodec::SilkRaw;
+                }
+                break;
         }
 
         if (ChunkProgLog().is_open()) {
@@ -277,6 +365,7 @@ void MixSpeakerChunksAt(
     if (speexCodec) speexCodec->Release();
     if (silkCodec) silkCodec->Release();
     if (opusCodec) opusCodec->Release();
+    if (silkRawCodec) silkRawCodec->Release();
 }
 
 } // namespace vr

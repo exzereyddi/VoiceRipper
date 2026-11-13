@@ -60,6 +60,17 @@ struct NetMsgState {
     // deltapacketentities and spawnbaseline, exactly like the real engine.
     int32_t maxClients = 32;
     std::string gameDir;
+
+    // Set the first time a svc_hltv(svc_hltv_active) message is seen. Demos
+    // recorded by the HLTV proxy are NOT POV demos: the proxy writes
+    // svc_clientdata as a bare 1-byte marker with NO payload (ReHLDS
+    // HLTV/Core/src/World.cpp World::WriteFrame: `if (m_IsHLTV)
+    // unreliableStream->WriteByte(svc_clientdata); else ...full delta...`).
+    // Parsing the (nonexistent) clientdata delta there eats ~a dozen bytes
+    // of following messages every frame, derailing the whole stream -- this
+    // was the root cause of VoiceRipper desyncing on ~32% of frames of HLTV
+    // demos while being perfectly in sync on POV demos.
+    bool isHLTV = false;
 };
 
 } // namespace vr

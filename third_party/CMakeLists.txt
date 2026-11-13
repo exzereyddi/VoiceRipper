@@ -75,6 +75,7 @@ add_library(vr_codec_glue STATIC
     codec_glue/utlbuffer.cpp
     codec_glue/VoiceEncoder_Opus.cpp
     codec_glue/VoiceEncoder_Silk.cpp
+    codec_glue/VoiceCodec_RawSilk.cpp
     codec_glue/VoiceEncoder_Speex.cpp
     codec_glue/voice_codec_frame.cpp
     codec_glue/wave_header.cpp

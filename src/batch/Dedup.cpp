@@ -34,28 +34,38 @@ ProcessedDemoSet::ProcessedDemoSet(std::string manifestPathUtf8)
     if (!in.is_open()) return;
     std::string line;
     while (std::getline(in, line)) {
-        if (line.empty()) continue;
+        // Format: "<16 hex digits> <v|e>"; older builds wrote just the
+        // bare hash (treated as HadVoice -- the caller still verifies
+        // the output folder exists for those, so a stale entry can never
+        // hide a deleted result).
         uint64_t h = 0;
-        if (std::sscanf(line.c_str(), "%llx", reinterpret_cast<unsigned long long*>(&h)) == 1) {
-            m_hashes.insert(h);
+        char flag = 'v';
+        if (std::sscanf(line.c_str(), "%llx %c",
+                        reinterpret_cast<unsigned long long*>(&h), &flag) >= 1) {
+            m_hashes[h] = (flag == 'e') ? DemoOutcome::Empty : DemoOutcome::HadVoice;
         }
     }
 }
 
-bool ProcessedDemoSet::Contains(uint64_t hash) const {
-    return m_hashes.count(hash) != 0;
+bool ProcessedDemoSet::Contains(uint64_t hash, DemoOutcome* outcome) const {
+    auto it = m_hashes.find(hash);
+    if (it == m_hashes.end()) return false;
+    if (outcome) *outcome = it->second;
+    return true;
 }
 
-void ProcessedDemoSet::Add(uint64_t hash) {
-    m_hashes.insert(hash);
+void ProcessedDemoSet::Add(uint64_t hash, DemoOutcome outcome) {
+    m_hashes[hash] = outcome;
 }
 
 void ProcessedDemoSet::Save() const {
     std::ofstream out(PathFromUtf8(m_manifestPath), std::ios::trunc);
     if (!out.is_open()) return;
-    for (uint64_t h : m_hashes) {
+    for (const auto& [h, outcome] : m_hashes) {
         char buf[32];
-        std::snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(h));
+        std::snprintf(buf, sizeof(buf), "%016llx %c",
+                      static_cast<unsigned long long>(h),
+                      outcome == DemoOutcome::Empty ? 'e' : 'v');
         out << buf << "\n";
     }
 }

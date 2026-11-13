@@ -464,6 +464,13 @@ void ParseNetMsgFrame(const uint8_t* data, size_t size, int32_t netProtocol,
             }
             case 14: HandleDeltaDescription(r, state); r.AlignToByte(); break; // svc_deltadescription
             case 15: {                                         // svc_clientdata
+                // In HLTV-proxy demos svc_clientdata is a bare 1-byte marker
+                // with NO payload — the proxy has no client data of its own
+                // (see the isHLTV comment in NetMsgTypes.hpp). Consuming the
+                // usual delta here eats the next messages' bytes and
+                // desyncs everything after them.
+                if (state.isHLTV) break;
+
                 // demoProtocol==3 legacy branch not supported (pre-Steam
                 // ancient demos); assume modern demoProtocol==5 layout.
                 bool hasDeltaSeq = r.ReadOneBit() != 0;
@@ -616,8 +623,20 @@ void ParseNetMsgFrame(const uint8_t* data, size_t size, int32_t netProtocol,
             case 49: r.ReadCString(); break;                   // svc_filetxferfailed
             case 50: {                                         // svc_hltv
                 uint8_t sub = r.ReadByteAligned();
-                if (sub == 1) r.SkipBits(10 * 8);
-                else if (sub == 2) r.ReadCString();
+                if (sub == 0) {
+                    // HLTV_ACTIVE: the world stream (and any demo recorded
+                    // from it) belongs to an HLTV proxy. From here on
+                    // svc_clientdata carries no payload at all.
+                    if (!state.isHLTV && g_trace) {
+                        NetMsgLog() << "  [hltv] HLTV_ACTIVE -- demo recorded "
+                                   << "by an HLTV proxy (clientdata is a bare "
+                                   << "1-byte marker from now on)\n";
+                    }
+                    state.isHLTV = true;
+                }
+                else if (sub == 1) r.SkipBits(10 * 8);   // HLTV_STATUS
+                else if (sub == 2) r.ReadCString();      // HLTV_LISTEN
+                // other subcommands: nothing on the wire
                 break;
             }
             case 51: {                                         // svc_director
