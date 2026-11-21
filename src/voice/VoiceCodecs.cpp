@@ -68,8 +68,10 @@ std::vector<int16_t> DecodeSpeakerChunks(
     float& outSpeakingSeconds) {
 
     std::vector<int16_t> out;
-    outFirstTime = chunks.empty() ? 0.0f : chunks.front().first;
-    outLastTime = chunks.empty() ? 0.0f : chunks.back().first;
+    // HLTV signon frames can carry a slightly negative timestamp
+    // (-0.001); don't let that leak into output filenames as "[-0.001]".
+    outFirstTime = chunks.empty() ? 0.0f : (chunks.front().first > 0.0f ? chunks.front().first : 0.0f);
+    outLastTime = chunks.empty() ? 0.0f : (chunks.back().first > 0.0f ? chunks.back().first : 0.0f);
     outSpeakingSeconds = 0.0f;
     if (chunks.empty()) return out;
 
@@ -292,7 +294,14 @@ void MixSpeakerChunksAt(
 
         if (ChunkProgLog().is_open()) {
             thread_local size_t mixChunkCounter = 0;
-            ChunkProgLog() << "[mixchunkprog] #" << mixChunkCounter++ << " t=" << time << " size=" << data.size() << std::endl;
+            char hex[128 * 3 + 1];
+            size_t hx = 0;
+            size_t nHex = data.size() < 128 ? data.size() : 128;
+            for (size_t hb = 0; hb < nHex; hb++) {
+                hx += std::snprintf(hex + hx, sizeof(hex) - hx, "%02X ", data[hb]);
+            }
+            ChunkProgLog() << "[mixchunkprog] #" << mixChunkCounter++ << " t=" << time << " size=" << data.size()
+                           << " head=" << hex << std::endl;
         }
 
         int samples = 0;
@@ -348,7 +357,23 @@ void MixSpeakerChunksAt(
 
         const int16_t* samplesArray = reinterpret_cast<const int16_t*>(decodeBuf.data());
 
-        size_t idealStart = static_cast<size_t>(time * static_cast<float>(sampleRate) + 0.5f);
+        // Absolute sample position for this chunk. HLTV demos can start
+        // at slightly negative times (the signon frame carries t=-0.001);
+        // casting a negative float straight to size_t is UB and on x64
+        // produces a ~2^64 offset, so a naive
+        // (size_t)(time * sampleRate) there makes dest.resize() request
+        // exabytes and the process aborts with 0xC0000409 before ANY
+        // output is written -- the whole tool just silently "did nothing"
+        // on such demos. Clamp to 0 (and sanity-cap absurdly large times
+        // the same way, so a corrupted frame timestamp can't blow up RAM).
+        size_t idealStart = 0;
+        if (time > 0.0f) {
+            double pos = static_cast<double>(time) * static_cast<double>(sampleRate) + 0.5;
+            constexpr double kMaxSaneSamplePos = 48.0 * 3600.0 * 48000.0; // 48h of 48kHz
+            if (pos < kMaxSaneSamplePos) {
+                idealStart = static_cast<size_t>(pos);
+            }
+        }
         size_t startSample = (!haveCursor || idealStart > cursor) ? idealStart : cursor;
         haveCursor = true;
 
