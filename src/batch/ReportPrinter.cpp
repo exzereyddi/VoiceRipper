@@ -44,11 +44,16 @@ void PrintDemoSummary(const DemoSummary& s, const std::string& outDirUtf8, bool 
                 std::cout << "  [WARN] " << s.warning << "\n";
             }
         }
+        if (s.msgCount > 0) {
+            std::cout << "  " << s.demoDisplayName << ": " << s.msgCount
+                      << " text message(s) -> " << s.msgListFileName << "\n";
+        }
         return;
     }
 
     if (quiet) {
         std::cout << "  " << s.demoDisplayName << ": " << s.written.size() << " speaker(s)";
+        if (s.msgCount > 0) std::cout << ", " << s.msgCount << " message(s)";
         if (!s.warning.empty()) std::cout << "  [WARN: " << s.warning << "]";
         std::cout << "\n";
         return;
@@ -82,6 +87,10 @@ void PrintDemoSummary(const DemoSummary& s, const std::string& outDirUtf8, bool 
     }
     if (!s.mixFileName.empty()) {
         std::cout << "    [ok] " << s.mixFileName << "  (everyone mixed together)\n";
+    }
+    if (!s.msgListFileName.empty()) {
+        std::cout << "    [ok] " << s.msgListFileName << "  (" << s.msgCount
+                  << " text messages)\n";
     }
 }
 

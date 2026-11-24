@@ -174,8 +174,8 @@ int main(int argc, char* argv[]) {
             if (s.ok) {
                 uint64_t h = vr::HashFileContents(item.path);
                 if (h != 0) {
-                    processedSet.Add(h, s.written.empty() ? vr::DemoOutcome::Empty
-                                                          : vr::DemoOutcome::HadVoice);
+                    processedSet.Add(h, (s.written.empty() && s.msgCount == 0) ? vr::DemoOutcome::Empty
+                                                                               : vr::DemoOutcome::HadVoice);
                 }
             }
             summaries[i] = std::move(s);

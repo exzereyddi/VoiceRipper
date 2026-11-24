@@ -2,6 +2,7 @@
 #include "PathUtf8.hpp"
 
 #include "../demo/DemoFile.hpp"
+#include "../demo/TextMessages.hpp"
 #include "../voice/Normalize.hpp"
 #include "../voice/VoiceExtractor.hpp"
 #include "../voice/WavWriter.hpp"
@@ -88,6 +89,34 @@ DemoSummary ProcessOneDemo(const std::string& demoPathUtf8, const std::string& d
         }
     }
 
+    std::string baseName = Utf8Stem(demoDisplayName);
+
+    // Text-message dump (UnrealDemoScanner-style): all text-bearing svc_*
+    // and SayText/TextMsg user messages go into "<demo>_msglist.txt" next
+    // to the output folder, even when the demo has no voice at all.
+    if (o.dumpText) {
+        TextMessageCollector texts = ExtractTextMessages(demo);
+        if (texts.Count() > 0) {
+            size_t slash = outDirUtf8.find_last_of("/\\");
+            std::string root = (slash == std::string::npos) ? std::string()
+                                                             : outDirUtf8.substr(0, slash);
+            std::string msgPath = (root.empty() ? "" : root + "/") + baseName + "_msglist.txt";
+            if (!root.empty()) {
+                std::error_code ec;
+                std::filesystem::create_directories(PathFromUtf8(root), ec);
+            }
+            std::string err;
+            if (texts.Save(PathFromUtf8(msgPath), err)) {
+                summary.msgCount = texts.Count();
+                summary.msgListFileName = baseName + "_msglist.txt";
+            } else if (summary.warning.empty()) {
+                summary.warning = err;
+            } else {
+                summary.warning += "; " + err;
+            }
+        }
+    }
+
     if (result.speakers.empty()) {
         summary.ok = true; // not an error, just nothing to write -- and
                             // deliberately no output folder created either
@@ -100,8 +129,6 @@ DemoSummary ProcessOneDemo(const std::string& demoPathUtf8, const std::string& d
               [](const SpeakerTrack& a, const SpeakerTrack& b) {
                   return a.speakingSeconds > b.speakingSeconds;
               });
-
-    std::string baseName = Utf8Stem(demoDisplayName);
 
     for (auto& speaker : result.speakers) {
         if (o.extract.normalize) {

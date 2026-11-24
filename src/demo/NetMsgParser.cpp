@@ -1,5 +1,6 @@
 #include "NetMsgParser.hpp"
 
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -9,6 +10,19 @@
 namespace vr {
 
 namespace {
+
+void EmitText(const NetMsgCallbacks& cb, const char* type, const std::string& text) {
+    if (cb.onText) cb.onText(type, text);
+}
+
+std::string ReadSpanCString(const uint8_t* p, size_t n) {
+    std::string s;
+    for (size_t i = 0; i < n && i < 256; i++) {
+        if (p[i] == 0) break;
+        s += static_cast<char>(p[i]);
+    }
+    return s;
+}
 
 bool g_trace = []() {
     const char* e = std::getenv("VR_TRACE");
@@ -387,7 +401,10 @@ void ParseNetMsgFrame(const uint8_t* data, size_t size, int32_t netProtocol,
                 return;
             case 1: // svc_nop
                 break;
-            case 2: r.ReadCString(); break;                    // svc_disconnect
+            case 2: {                                          // svc_disconnect
+                EmitText(cb, "DISCONNECT", r.ReadCString());
+                break;
+            }
             case 3: {                                          // svc_event
                 uint32_t nEvents = r.ReadBits(5);
                 for (uint32_t i = 0; i < nEvents && ok; i++) {
@@ -420,8 +437,18 @@ void ParseNetMsgFrame(const uint8_t* data, size_t size, int32_t netProtocol,
                 break;
             }
             case 7: r.SkipBits(32); break;                     // svc_time (float)
-            case 8: r.ReadCString(); break;                    // svc_print
-            case 9: r.ReadCString(); break;                    // svc_stufftext
+            case 8: {                                          // svc_print
+                std::string s = r.ReadCString();
+                // UDS MessagePrint: strip one trailing non-alphanumeric char
+                // (the trailing \n / color marker servers append).
+                if (!s.empty() && !std::isalnum(static_cast<unsigned char>(s.back()))) s.pop_back();
+                EmitText(cb, "PRINT", s);
+                break;
+            }
+            case 9: {                                          // svc_stufftext
+                EmitText(cb, "CLIENT_CMD", r.ReadCString());
+                break;
+            }
             case 10: r.SkipBits(48); break;                    // svc_setangle (3x int16)
             case 11: {                                         // svc_serverinfo
                 r.SkipBits(32 + 32 + 32);  // 2x int32 + mapcrc uint32
@@ -449,7 +476,11 @@ void ParseNetMsgFrame(const uint8_t* data, size_t size, int32_t netProtocol,
                 }
                 break;
             }
-            case 12: r.SkipBits(8); r.ReadCString(); break;    // svc_lightstyle
+            case 12: {                                         // svc_lightstyle
+                r.SkipBits(8);
+                EmitText(cb, "LIGHT", r.ReadCString());
+                break;
+            }
             case 13: {                                         // svc_updateuserinfo
                 uint8_t slot = r.ReadByteAligned();
                 int32_t userId = r.ReadI32Aligned();
@@ -538,19 +569,36 @@ void ParseNetMsgFrame(const uint8_t* data, size_t size, int32_t netProtocol,
             case 25: r.SkipBits(8); break;                     // svc_signonnum
             case 26: {                                         // svc_centerprint
                 std::string s = r.ReadCString();
-                if (s.rfind("%s", 0) == 0) r.ReadCString();
+                if (s.rfind("%s", 0) == 0) {
+                    s += "|" + r.ReadCString();
+                }
+                EmitText(cb, "PRINT_CENTER", s);
                 break;
             }
             case 27: break;                                    // svc_killedmonster
             case 28: break;                                    // svc_foundsecret
             case 29: r.SkipBits(14 * 8); break;                // svc_spawnstaticsound
             case 30: break;                                    // svc_intermission
-            case 31: r.ReadCString(); break;                   // svc_finale
+            case 31: {                                         // svc_finale
+                EmitText(cb, "SVC_FINALE", r.ReadCString());
+                break;
+            }
             case 32: r.SkipBits(2 * 8); break;                 // svc_cdtrack
-            case 33: r.ReadCString(); break;                   // svc_restore
-            case 34: r.ReadCString(); break;                   // svc_cutscene
+            case 33: {                                         // svc_restore
+                EmitText(cb, "CL_RESTORE", r.ReadCString());
+                break;
+            }
+            case 34: {                                         // svc_cutscene
+                EmitText(cb, "CENTER_SCENE", r.ReadCString());
+                break;
+            }
             case 35: r.SkipBits(2 * 8); break;                 // svc_weaponanim
-            case 36: r.SkipBits(8); r.ReadCString(); break;    // svc_decalname
+            case 36: {                                         // svc_decalname
+                uint8_t decalId = r.ReadByteAligned();
+                std::string decalName = r.ReadCString();
+                EmitText(cb, "SET_DECAL", "ID:" + std::to_string(decalId) + " = " + decalName);
+                break;
+            }
             case 37: r.SkipBits(16); break;                    // svc_roomtype
             case 38: r.SkipBits(16); break;                    // svc_addangle
             case 39: {                                         // svc_newusermsg
@@ -611,7 +659,7 @@ void ParseNetMsgFrame(const uint8_t* data, size_t size, int32_t netProtocol,
             case 45: r.SkipBits(8 * 8); break;                 // svc_resourcerequest
             case 46: {                                         // svc_customization
                 r.SkipBits(16);      // 2 bytes
-                r.ReadCString();
+                EmitText(cb, "CUSTOMIZATION", r.ReadCString());
                 r.SkipBits(16);      // uint16
                 r.SkipBits(32);      // uint32
                 uint8_t flags = r.ReadByteAligned();
@@ -620,7 +668,10 @@ void ParseNetMsgFrame(const uint8_t* data, size_t size, int32_t netProtocol,
             }
             case 47: r.SkipBits(2 * 8); break;                 // svc_crosshairangle
             case 48: r.SkipBits(4 * 8); break;                 // svc_soundfade
-            case 49: r.ReadCString(); break;                   // svc_filetxferfailed
+            case 49: {                                         // svc_filetxferfailed
+                EmitText(cb, "FILE_FAILED", r.ReadCString());
+                break;
+            }
             case 50: {                                         // svc_hltv
                 uint8_t sub = r.ReadByteAligned();
                 if (sub == 0) {
@@ -635,29 +686,39 @@ void ParseNetMsgFrame(const uint8_t* data, size_t size, int32_t netProtocol,
                     state.isHLTV = true;
                 }
                 else if (sub == 1) r.SkipBits(10 * 8);   // HLTV_STATUS
-                else if (sub == 2) r.ReadCString();      // HLTV_LISTEN
+                else if (sub == 2) EmitText(cb, "HLTV", r.ReadCString()); // HLTV_LISTEN
                 // other subcommands: nothing on the wire
                 break;
             }
             case 51: {                                         // svc_director
                 uint8_t len = r.ReadByteAligned();
-                uint8_t msgType = r.ReadByteAligned();
-                if (msgType == 10) {
-                    r.ReadCString();
-                } else if (msgType == 6) {
-                    r.SkipBits(8);
-                    r.SkipBits(32);
-                    r.SkipBits(5 * 32);
-                    r.ReadCString();
-                } else if (len > 0) {
-                    r.SkipBits(static_cast<size_t>(len - 1) * 8);
+                const size_t payloadStartBit = r.BitPos();
+                const size_t payloadStartByte = payloadStartBit / 8;
+                if (payloadStartByte + len > size) { ok = false; break; }
+                const uint8_t* p = data + payloadStartByte;
+                const uint8_t msgType = len > 0 ? p[0] : 0;
+                if (msgType == 10 && len > 1) {             // DIRECTOR STUFF CMD
+                    EmitText(cb, "DIRECTOR_CMD", ReadSpanCString(p + 1, len - 1));
+                } else if (msgType == 6 && len > 26) {     // DIRECTOR HUD
+                    // effects(1) + color(4) + x/y/fadein/fadeout/holdtime/fxtime
+                    // (6 floats in UDS; older engines used 5). Pick whichever
+                    // offset leaves a plausible string in this message.
+                    size_t strOff = (len > 30) ? 30 : 26;
+                    EmitText(cb, "DIRECTOR_HUD", ReadSpanCString(p + strOff, len - strOff));
                 }
+                // UDS-style: restore and advance by the declared length, so
+                // a malformed director string can't desync the frame.
+                r.SeekBits(payloadStartBit);
+                r.SkipBits(static_cast<size_t>(len) * 8);
                 break;
             }
             case 52: {                                         // svc_voiceinit
                 std::string codec = r.ReadCString();
                 if (netProtocol >= 47 && !codec.empty()) r.ReadByteAligned();
                 if (cb.onVoiceInit) cb.onVoiceInit(codec);
+                // UDS emits the codec name twice (VOICE_CODEC + INIT_CODEC).
+                EmitText(cb, "VOICE_CODEC", codec);
+                EmitText(cb, "INIT_CODEC", codec);
                 break;
             }
             case 53: {                                         // svc_voicedata
@@ -672,11 +733,28 @@ void ParseNetMsgFrame(const uint8_t* data, size_t size, int32_t netProtocol,
                 r.SkipBits(static_cast<size_t>(len) * 8);
                 break;
             }
-            case 54: r.ReadCString(); r.SkipBits(8); break;    // svc_sendextrainfo
+            case 54: {                                         // svc_sendextrainfo
+                EmitText(cb, "SEARCH_EXTRA", r.ReadCString());
+                r.SkipBits(8);
+                break;
+            }
             case 55: r.SkipBits(4 * 8); break;                 // svc_timescale
-            case 56: r.ReadCString(); break;                   // svc_resourcelocation
-            case 57: r.ReadCString(); break;                   // svc_sendcvarvalue
-            case 58: r.SkipBits(32); r.ReadCString(); break;   // svc_sendcvarvalue2
+            case 56: {                                         // svc_resourcelocation
+                std::string loc = r.ReadCString();
+                if (loc.size() >= 4 && (loc.compare(0, 4, "http") == 0 || loc.compare(0, 4, "HTTP") == 0)) {
+                    EmitText(cb, "DOWNLOAD_URL", loc);
+                }
+                break;
+            }
+            case 57: {                                         // svc_sendcvarvalue
+                EmitText(cb, "CVAR_REQUEST", r.ReadCString());
+                break;
+            }
+            case 58: {                                         // svc_sendcvarvalue2
+                r.SkipBits(32);
+                EmitText(cb, "CVAR_REQUEST_V2", r.ReadCString());
+                break;
+            }
             case 59: {                                         // svc_exec
                 uint8_t what = r.ReadByteAligned();
                 if (what == 1) r.ReadByteAligned();
@@ -685,12 +763,31 @@ void ParseNetMsgFrame(const uint8_t* data, size_t size, int32_t netProtocol,
             default: {
                 if (id >= 64) {
                     auto it = state.userMessages.find(id);
-                    if (it != state.userMessages.end() && it->second.length >= 0) {
-                        r.SkipBits(static_cast<size_t>(it->second.length) * 8);
+                    const std::string name = (it == state.userMessages.end())
+                                                 ? std::string() : it->second.name;
+                    const int8_t declared = (it == state.userMessages.end())
+                                                ? -1 : it->second.length;
+                    const size_t payloadStartBit = r.BitPos(); // right after the id byte
+                    size_t payloadBytes = 0;
+                    if (declared >= 0) {
+                        payloadBytes = static_cast<size_t>(declared);
                     } else {
                         uint8_t len = r.ReadByteAligned();
-                        r.SkipBits(static_cast<size_t>(len) * 8);
+                        payloadBytes = 1 + static_cast<size_t>(len);
                     }
+                    const size_t payloadStartByte = payloadStartBit / 8;
+                    if (payloadStartByte + payloadBytes > size) {
+                        ok = false;
+                        break;
+                    }
+                    if (cb.onUserMessage) {
+                        cb.onUserMessage(name, data + payloadStartByte, payloadBytes);
+                    }
+                    // UDS's resilience trick: save pos -> callback -> restore
+                    // -> advance by the declared length. A malformed string
+                    // inside SayText/TextMsg can never desync the frame.
+                    r.SeekBits(payloadStartBit);
+                    r.SkipBits(payloadBytes * 8);
                 } else {
                     ok = false; // ids 60-63 unregistered
                 }

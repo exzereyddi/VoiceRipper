@@ -23,6 +23,8 @@ struct DemoSummary {
     std::string warning; // non-fatal issue (e.g. high parser desync rate) -- demo still processed
     std::vector<WrittenFile> written;
     std::string mixFileName;
+    size_t msgCount = 0;             // number of text messages dumped
+    std::string msgListFileName;     // "<demo>_msglist.txt", if written
 };
 
 // Converts a 64-bit community SteamID (as sent in the "*sid" userinfo key)

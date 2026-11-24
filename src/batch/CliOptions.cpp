@@ -32,6 +32,7 @@ void PrintUsage() {
         "      --no-opus        disable Opus decoding\n"
         "      --no-normalize   skip loudness normalization\n"
         "      --trim-silence   collapse long silent gaps\n"
+        "      --no-chat        don't write <demo>_msglist.txt (text message dump)\n"
 #ifdef VR_WITH_MP3
         "      --mp3            also export .mp3 (in addition to .wav)\n"
 #endif
@@ -91,6 +92,8 @@ bool ParseCliArgs(int argc, const std::vector<std::string>& utf8Args, CliOptions
             o.extract.normalize = false;
         } else if (a == "--trim-silence") {
             o.extract.removeSilenceGaps = true;
+        } else if (a == "--no-chat") {
+            o.dumpText = false;
         } else if (a == "--mp3") {
             o.writeMp3 = true;
         } else if (a == "--no-autoclose") {

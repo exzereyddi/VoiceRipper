@@ -14,6 +14,7 @@ struct CliOptions {
     bool writeMp3 = false;
     bool noAutoClose = false;
     bool force = false;
+    bool dumpText = true;
     int autoCloseSeconds = 3;
     ExtractOptions extract;
 };

@@ -12,6 +12,14 @@ struct NetMsgCallbacks {
     std::function<void(const std::string& codecName)> onVoiceInit;
     std::function<void(uint8_t slot, const uint8_t* data, size_t len)> onVoiceData;
     std::function<void(uint8_t slot, int32_t userId, const std::string& infoString)> onUserInfo;
+
+    // Text-dump callbacks (UnrealDemoScanner-style message log). onText is
+    // invoked for every text-bearing svc_* message; onUserMessage receives
+    // the raw payload of a dynamic user message (id >= 64) starting at its
+    // length byte, so SayText/TextMsg can be decoded without disturbing
+    // the parser's bit position.
+    std::function<void(const std::string& type, const std::string& text)> onText;
+    std::function<void(const std::string& name, const uint8_t* payload, size_t len)> onUserMessage;
 };
 
 // Walks one NetMsg frame's raw engine-message bytes (the "msg" bytes that
